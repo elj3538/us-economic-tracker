@@ -106,22 +106,84 @@ def transform_series(pts: list[tuple[str, float]], mode: str) -> list[dict[str, 
     return out
 
 
+def _parse_wareki_date(s: str) -> str | None:
+    """財務省CSVの和暦日付（例: R8.11.19, H31.4.26）を YYYY-MM-DD に変換する。"""
+    s = s.strip()
+    if not s or "." not in s:
+        return None
+    era = s[0].upper()
+    parts = s[1:].split(".")
+    if len(parts) != 3 or not all(p.isdigit() for p in parts):
+        return None
+    y, m, d = int(parts[0]), int(parts[1]), int(parts[2])
+    base = {"R": 2018, "H": 1988, "S": 1925}.get(era)
+    if base is None:
+        return None
+    return f"{base + y:04d}-{m:02d}-{d:02d}"
+
+
 def fetch_jgb10y_series(cache_dir: Path | None = None, use_cache: bool = True) -> list[tuple[str, float]]:
-    """日本10年国債利回りの日次推移を stooq から取得（失敗時はFRED月次 IRLTLT01JPM156N にフォールバック）。"""
-    try:
-        resp = _http_get("https://stooq.com/q/d/l/?s=10yjp.b&i=d", timeout=15)
-        if resp.status_code == 200 and "Date,Open" in resp.text:
-            df = pd.read_csv(io.StringIO(resp.text))
-            pts: list[tuple[str, float]] = []
-            for d_raw, v_raw in zip(df["Date"], df["Close"]):
-                if pd.isna(v_raw):
+    """日本10年国債利回りの日次推移を財務省公式CSV（jgbcm.csv）から取得する。"""
+    pts: list[tuple[str, float]] = []
+    for url in (
+        "https://www.mof.go.jp/jgbs/reference/interest_rate/data/jgbcm_all.csv",
+        "https://www.mof.go.jp/jgbs/reference/interest_rate/jgbcm.csv",
+    ):
+        try:
+            resp = _http_get(url, timeout=15)
+            if resp.status_code != 200:
+                continue
+            text = resp.content.decode("cp932", errors="ignore")
+            by_date: dict[str, float] = {}
+            for line in text.splitlines():
+                cols = [c.strip() for c in line.split(",")]
+                if len(cols) <= 10:
                     continue
-                pts.append((str(d_raw)[:10], float(v_raw)))
-            if pts:
-                return pts[-260:]
-    except Exception:
-        pass
+                dt = _parse_wareki_date(cols[0])
+                if not dt or cols[10] in ("", "-"):
+                    continue
+                try:
+                    by_date[dt] = float(cols[10])
+                except ValueError:
+                    continue
+            if by_date:
+                pts = [(d, by_date[d]) for d in sorted(by_date.keys())[-90:]]
+                if url.endswith("jgbcm.csv") or len(pts) >= 5:
+                    # 当月CSVも最新補完するため、allが取れたらそのまま最新日を確認して返す
+                    if url.endswith("jgbcm_all.csv"):
+                        # 当月最新(jgbcm.csv)もマージ
+                        try:
+                            r2 = _http_get("https://www.mof.go.jp/jgbs/reference/interest_rate/jgbcm.csv", timeout=10)
+                            if r2.status_code == 200:
+                                for ln in r2.content.decode("cp932", errors="ignore").splitlines():
+                                    cs = [c.strip() for c in ln.split(",")]
+                                    if len(cs) > 10:
+                                        d2 = _parse_wareki_date(cs[0])
+                                        if d2 and cs[10] not in ("", "-"):
+                                            try:
+                                                by_date[d2] = float(cs[10])
+                                            except ValueError:
+                                                pass
+                                pts = [(d, by_date[d]) for d in sorted(by_date.keys())[-90:]]
+                        except Exception:
+                            pass
+                    return pts
+        except Exception:
+            continue
     return fetch_fred_series("IRLTLT01JPM156N", cache_dir=cache_dir, use_cache=use_cache)
+
+
+def _fetch_yf_series(symbol: str) -> list[tuple[str, float]]:
+    """yfinanceから直近3か月分の日次終値 (date, close) を取得する。"""
+    try:
+        import yfinance as yf
+        hist = yf.Ticker(symbol).history(period="4mo", interval="1d")
+        if hist is None or hist.empty or "Close" not in hist.columns:
+            return []
+        close = hist["Close"].dropna()
+        return [(idx.strftime("%Y-%m-%d"), float(v)) for idx, v in close.items()]
+    except Exception:
+        return []
 
 
 def fetch_all_indicators(
@@ -161,22 +223,27 @@ def fetch_market_cards(
     cache_dir: Path | None = None,
     use_cache: bool = True,
 ) -> list[dict[str, Any]]:
-    """主要マーケット6カード（ドル円・米10年・日本10年・WTI・S&P500・日経平均）を取得する。"""
+    """主要マーケット6カード（ドル円・米10年・日本10年・WTI・S&P500・日経平均）を最新日次データで取得する。"""
     specs = [
-        {"id": "usdjpy", "label": "ドル円", "unit": "円", "digits": 2, "fred_id": "DEXJPUS", "source": "FRED (FRB H.10)"},
-        {"id": "us10y", "label": "米10年国債利回り", "unit": "%", "digits": 2, "fred_id": "DGS10", "source": "FRED (米財務省)"},
-        {"id": "jgb10y", "label": "日本10年国債利回り", "unit": "%", "digits": 2, "fred_id": "_JGB10Y_", "source": "stooq / FRED"},
-        {"id": "wti", "label": "WTI原油", "unit": "ドル", "digits": 2, "fred_id": "DCOILWTICO", "source": "FRED (EIA)"},
-        {"id": "sp500", "label": "S&P 500", "unit": "", "digits": 1, "fred_id": "SP500", "source": "FRED (S&P DJI)"},
-        {"id": "nikkei225", "label": "日経平均株価", "unit": "円", "digits": 0, "fred_id": "NIKKEI225", "source": "FRED (日経)"},
+        {"id": "usdjpy", "label": "ドル円", "unit": "円", "digits": 2, "yf": "JPY=X", "fred_id": "DEXJPUS", "source": "Yahoo Finance (日次)"},
+        {"id": "us10y", "label": "米10年国債利回り", "unit": "%", "digits": 2, "yf": "^TNX", "fred_id": "DGS10", "source": "Yahoo Finance / 米財務省"},
+        {"id": "jgb10y", "label": "日本10年国債利回り", "unit": "%", "digits": 2, "yf": None, "fred_id": "_JGB10Y_", "source": "財務省（日次国債金利）"},
+        {"id": "wti", "label": "WTI原油", "unit": "ドル", "digits": 2, "yf": "CL=F", "fred_id": "DCOILWTICO", "source": "Yahoo Finance (先物日次)"},
+        {"id": "sp500", "label": "S&P 500", "unit": "", "digits": 1, "yf": "^GSPC", "fred_id": "SP500", "source": "Yahoo Finance (日次)"},
+        {"id": "nikkei225", "label": "日経平均株価", "unit": "円", "digits": 0, "yf": "^N225", "fred_id": "NIKKEI225", "source": "Yahoo Finance / FRED"},
     ]
     cards: list[dict[str, Any]] = []
     for sp in specs:
-        pts = (
-            fetch_jgb10y_series(cache_dir=cache_dir, use_cache=use_cache)
-            if sp["fred_id"] == "_JGB10Y_"
-            else fetch_fred_series(sp["fred_id"], cache_dir=cache_dir, use_cache=use_cache)
-        )
+        if sp["fred_id"] == "_JGB10Y_":
+            pts = fetch_jgb10y_series(cache_dir=cache_dir, use_cache=use_cache)
+        else:
+            yf_pts = _fetch_yf_series(sp["yf"]) if sp.get("yf") else []
+            fr_pts = fetch_fred_series(sp["fred_id"], cache_dir=cache_dir, use_cache=use_cache)
+            # 日付が新しいソースを自動採用
+            if yf_pts and (not fr_pts or yf_pts[-1][0] >= fr_pts[-1][0]):
+                pts = yf_pts
+            else:
+                pts = fr_pts
         if not pts:
             cards.append({**sp, "latest": None, "prev": None, "change": None, "change_pct": None, "date": None, "spark": []})
             continue
