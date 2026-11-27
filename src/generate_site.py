@@ -236,6 +236,16 @@ h1 {{ margin: 0; font-size: 21px; }}
 .chart-tip .tip-val {{ font-size: 14px; font-weight: 800; }}
 .chart-tip .tip-diff {{ font-size: 11px; color: var(--muted); margin-top: 1px; }}
 .spark-wrap {{ position: relative; cursor: crosshair; }}
+.cal-card {{
+  background: var(--surface); border: 1px solid var(--border); border-radius: 10px;
+  padding: 8px 10px 4px; overflow: hidden;
+}}
+.cal-head {{
+  display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 8px;
+  margin: 18px 0 10px;
+}}
+.cal-head .sec-title {{ margin: 0; }}
+.cal-note {{ font-size: 11px; color: var(--muted); text-align: right; padding: 2px 4px 4px; }}
 .detail-svg {{ width: 100%; height: auto; background: var(--bg); border-radius: 8px; display: block; cursor: crosshair; touch-action: none; }}
 details.panel {{ background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px; margin-top: 18px; }}
 details.panel > summary {{ cursor: pointer; font-weight: 700; font-size: 14px; }}
@@ -271,6 +281,15 @@ th {{ color: var(--muted); background: var(--bg); }}
 
   <div class="sec-title">💹 主要マーケット（直近60営業日推移）</div>
   <div class="mkt-grid" id="mkt-grid"></div>
+
+  <div class="cal-head">
+    <div class="sec-title">📅 今週の経済指標発表（米国・前回／予想／結果）</div>
+    <div class="range-btns" id="cal-imp-btns"></div>
+  </div>
+  <div class="cal-card">
+    <div id="tv-econ-cal"></div>
+    <div class="cal-note">リアルタイム経済カレンダー提供: <a href="https://jp.tradingview.com/economic-calendar/" target="_blank" rel="noopener nofollow">TradingView</a></div>
+  </div>
 
   <div class="sec-title">🧭 米国経済状況サマリー ＆ 景気シグナル</div>
   <div class="summary-grid" id="summary-grid"></div>
@@ -343,8 +362,43 @@ let cmpIds = [];
 let currentModalInd = null;
 let currentRange = "5Y";
 let currentChartType = localStorage.getItem(LS_CHART_TYPE) || "line";
+let calImportance = "0,1";
 const sparkStore = new Map();
 let sparkSeq = 0;
+
+function renderEconCalendar() {{
+  const btns = document.getElementById("cal-imp-btns");
+  if (btns) {{
+    btns.innerHTML = [
+      ["0,1", "重要度: 中・高"],
+      ["-1,0,1", "すべて"],
+    ].map(([k, lbl]) =>
+      `<button class="${{calImportance === k ? "active" : ""}}" onclick="setCalImportance('${{k}}')">${{lbl}}</button>`
+    ).join("");
+  }}
+  const host = document.getElementById("tv-econ-cal");
+  if (!host) return;
+  const isDark = document.body.classList.contains("dark");
+  host.innerHTML = `<div class="tradingview-widget-container"><div class="tradingview-widget-container__widget"></div></div>`;
+  const sc = document.createElement("script");
+  sc.type = "text/javascript";
+  sc.async = true;
+  sc.src = "https://s3.tradingview.com/external-embedding/embed-widget-events.js";
+  sc.text = JSON.stringify({{
+    colorTheme: isDark ? "dark" : "light",
+    isTransparent: true,
+    width: "100%",
+    height: "420",
+    locale: "ja",
+    importanceFilter: calImportance,
+    countryFilter: "us",
+  }});
+  host.querySelector(".tradingview-widget-container").appendChild(sc);
+}}
+function setCalImportance(imp) {{
+  calImportance = imp;
+  renderEconCalendar();
+}}
 
 function showTip(ev, html) {{
   const tip = document.getElementById("chart-tip");
@@ -371,6 +425,7 @@ function hideTip() {{
 function toggleDark() {{
   document.body.classList.toggle("dark");
   localStorage.setItem(LS_DARK, document.body.classList.contains("dark") ? "1" : "0");
+  renderEconCalendar();
 }}
 if (localStorage.getItem(LS_DARK) === "1") document.body.classList.add("dark");
 
@@ -850,6 +905,7 @@ function renderEvents() {{
 }}
 
 renderMarket();
+renderEconCalendar();
 renderSummary();
 renderTabs();
 renderCards();
